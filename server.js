@@ -13,8 +13,6 @@ const docusignRoutes = require('./routes/docusign');
 const app = express();
 
 // CORS: allow Base44 frontends, the SOCO Wix site, and any wixsite.com subdomain.
-// Anonymous Lead/Contact creation is gated by RLS on the Base44 side, so it's
-// safe to open these origins for the /api/leads form-embed endpoint.
 app.use(cors({
     origin: [
         'https://avlproj.base44.app',
@@ -28,17 +26,13 @@ app.use(cors({
     ],
 }));
 
-// Twilio sends form-encoded data for webhooks
 app.use('/webhooks', express.urlencoded({ extended: false }));
-// Our API endpoints use JSON (raise limit for attached PDF data URLs)
 app.use('/api', express.json({ limit: '25mb' }));
 
-// Health check
 app.get('/', (req, res) => {
     res.json({ status: 'ok', service: 'SOCO Twilio + Email Middleware' });
 });
 
-// EXTERNAL EMAIL via Resend (POST /api/email/send)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 app.post('/api/email/send', async (req, res) => {
@@ -103,8 +97,6 @@ app.post('/api/sms/send', async (req, res) => {
         if (!to || !body) {
             return res.status(400).json({ error: 'Missing required fields: to, body.' });
         }
-
-        // Normalize US 10-digit to E.164
         let toNumber = String(to).trim();
         if (!toNumber.startsWith('+')) {
             const digits = toNumber.replace(/\D/g, '');
@@ -112,7 +104,6 @@ app.post('/api/sms/send', async (req, res) => {
             else if (digits.length === 11 && digits.startsWith('1')) toNumber = '+' + digits;
             else toNumber = '+' + digits;
         }
-
         const params = { to: toNumber, body: String(body) };
         if (from) {
             params.from = from;
@@ -129,82 +120,85 @@ app.post('/api/sms/send', async (req, res) => {
         if (process.env.BASE_URL) {
             params.statusCallback = `${process.env.BASE_URL}/webhooks/sms/status`;
         }
-
         const msg = await twilioClient.messages.create(params);
         console.log(`SMS sent to ${toNumber} (sid=${msg.sid}, status=${msg.status})`);
         return res.json({ ok: true, sid: msg.sid, status: msg.status, to: msg.to, from: msg.from });
     } catch (err) {
         console.error('sms send failed:', err);
-        return res.status(500).json({
-            error: err.message || 'Unknown error',
-            code: err.code,
-            moreInfo: err.moreInfo,
-        });
+        return res.status(500).json({ error: err.message || 'Unknown error', code: err.code, moreInfo: err.moreInfo });
     }
 });
 
 // PUBLIC LEAD CAPTURE (POST /api/leads)
-// Used by embedded HTML lead forms (Wix, affiliate landing pages, etc).
-// Creates a Lead in Base44 and emails the team. No auth required — Base44
-// RLS already allows anonymous create on the Lead entity.
+// Accepts the full SOCO lead form schema and writes a Lead record to Base44
+// using the canonical field names (contact_first_name, shipping_address,
+// screen_size, etc.). Used by embedded HTML lead forms on Wix and affiliate pages.
 app.post('/api/leads', async (req, res) => {
     try {
         const body = req.body || {};
-        const {
-            name,
-            email,
-            phone,
-            company,
-            service_type,
-            address,
-            city,
-            state,
-            zip,
-            requested_call_date,
-            requested_call_time,
-            project_details,
-            message,
-            sms_consent,
-            affiliate_slug,
-            affiliate_name,
-            referral_source: rawReferralSource,
-        } = body;
 
-        if (!name || !email || !phone) {
-            return res.status(400).json({ error: 'Missing required fields: name, email, phone.' });
+        // Accept either {name} or {contact_first_name, contact_last_name}
+        let firstName = body.contact_first_name || '';
+        let lastName = body.contact_last_name || '';
+        if (!firstName && !lastName && body.name) {
+            const parts = String(body.name).trim().split(/\s+/);
+            firstName = parts.shift() || '';
+            lastName = parts.join(' ');
+        }
+
+        if (!firstName || !body.email || !body.phone) {
+            return res.status(400).json({ error: 'Missing required fields: first name, email, phone.' });
         }
 
         // Normalize phone to E.164 (US default)
-        let normalizedPhone = String(phone).trim();
-        if (!normalizedPhone.startsWith('+')) {
-            const digits = normalizedPhone.replace(/\D/g, '');
-            if (digits.length === 10) normalizedPhone = '+1' + digits;
-            else if (digits.length === 11 && digits.startsWith('1')) normalizedPhone = '+' + digits;
-            else if (digits.length) normalizedPhone = '+' + digits;
+        let phone = String(body.phone).trim();
+        if (!phone.startsWith('+')) {
+            const digits = phone.replace(/\D/g, '');
+            if (digits.length === 10) phone = '+1' + digits;
+            else if (digits.length === 11 && digits.startsWith('1')) phone = '+' + digits;
+            else if (digits.length) phone = '+' + digits;
         }
 
-        // Affiliate-aware referral source
-        let referral_source = rawReferralSource;
-        if (affiliate_name) referral_source = `Affiliate: ${affiliate_name}`;
-        else if (affiliate_slug) referral_source = `Affiliate: ${affiliate_slug}`;
+        // Affiliate-aware referral source / source labels
+        let referral_source = body.referral_source || null;
+        let source = body.source || 'Website Lead Form';
+        let source_detail = body.source_detail || '';
+        if (body.affiliate_name || body.affiliate_slug) {
+            source = 'Affiliate Link';
+            source_detail = body.affiliate_name || body.affiliate_slug;
+            referral_source = referral_source || 'Existing Customer Referral';
+        }
 
         const leadData = {
-            name,
-            email,
-            phone: normalizedPhone,
-            company: company || '',
-            service_type: service_type || null,
-            address: address || '',
-            city: city || '',
-            state: state || '',
-            zip: zip || '',
-            requested_call_date: requested_call_date || null,
-            requested_call_time: requested_call_time || null,
-            message: project_details || message || '',
-            sms_consent: !!sms_consent,
-            referral_source: referral_source || null,
-            affiliate_slug: affiliate_slug || null,
+            contact_first_name: firstName,
+            contact_last_name: lastName,
+            email: body.email,
+            phone,
+            company_name: body.company_name || body.company || '',
+            service_type: body.service_type || null,
+            referral_source,
+            shipping_address: body.shipping_address || body.address || '',
+            shipping_city: body.shipping_city || body.city || '',
+            shipping_state: body.shipping_state || body.state || '',
+            shipping_zip: body.shipping_zip || body.zip || '',
+            location: body.location || '',
+            screen_size: body.screen_size || '',
+            viewing_distance: body.viewing_distance || '',
+            install_method: body.install_method || '',
+            install_requested: body.install_requested || '',
+            project_type: body.project_type || '',
+            project_date_start: body.project_date_start || null,
+            project_date_end: body.project_date_end || null,
+            budget_range: body.budget_range || '',
+            timeline: body.timeline || '',
+            message: body.message || body.project_details || '',
+            requested_call_date: body.requested_call_date || null,
+            requested_call_time: body.requested_call_time || null,
+            sms_consent: !!body.sms_consent,
+            source,
+            source_detail,
             status: 'New',
+            priority: 'Medium',
         };
 
         let lead;
@@ -215,27 +209,41 @@ app.post('/api/leads', async (req, res) => {
             return res.status(502).json({ error: 'Could not save lead. Please try again or call us.', detail: e.message });
         }
 
-        // Fire team notification email (non-blocking — don't fail the request if email fails)
+        // Fire team notification email (non-blocking)
         if (resend) {
-            const sourceLabel = referral_source || 'Direct (website)';
-            const subject = affiliate_name
-                ? `New Lead via ${affiliate_name}: ${name}`
-                : `New Lead: ${name}`;
-            const htmlBody = `
+            const fullName = [firstName, lastName].filter(Boolean).join(' ');
+            const sourceLabel = source_detail ? `${source} — ${source_detail}` : source;
+            const subject = body.affiliate_name
+                ? `New Lead via ${body.affiliate_name}: ${fullName}`
+                : `New Lead: ${fullName}`;
+            const addr = [leadData.shipping_address, leadData.shipping_city, leadData.shipping_state, leadData.shipping_zip].filter(Boolean).join(', ');
+            const rows = [
+                ['Source', sourceLabel],
+                ['Name', fullName],
+                ['Email', `<a href="mailto:${escapeHtml(leadData.email)}">${escapeHtml(leadData.email)}</a>`],
+                ['Phone', `<a href="tel:${escapeHtml(leadData.phone)}">${escapeHtml(leadData.phone)}</a>`],
+                ['Company', leadData.company_name],
+                ['Service', leadData.service_type],
+                ['Address', addr],
+                ['Indoor/Outdoor', leadData.location],
+                ['Screen Size', leadData.screen_size],
+                ['Viewing Distance', leadData.viewing_distance],
+                ['Install Method', leadData.install_method],
+                ['SOCO Install?', leadData.install_requested],
+                ['Project Type', leadData.project_type],
+                ['Timeline', leadData.timeline],
+                ['Budget Range', leadData.budget_range],
+                ['Requested Call', [leadData.requested_call_date, leadData.requested_call_time].filter(Boolean).join(' ')],
+                ['SMS Consent', leadData.sms_consent ? 'Yes' : 'No'],
+            ].filter(([, v]) => v && String(v).trim());
+
+            const html = `
               <div style="font-family: Arial, sans-serif; max-width:600px;">
                 <h2 style="color:#111827; border-bottom:3px solid #F97316; padding-bottom:8px;">New Lead Submitted</h2>
-                <p><strong>Source:</strong> ${sourceLabel}</p>
                 <table style="border-collapse:collapse; width:100%; margin-top:12px;">
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Name</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(name)}</td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Email</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Phone</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;"><a href="tel:${escapeHtml(normalizedPhone)}">${escapeHtml(normalizedPhone)}</a></td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Company</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(company || '-')}</td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Service</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(service_type || '-')}</td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Address</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml([address, city, state, zip].filter(Boolean).join(', ') || '-')}</td></tr>
-                  ${requested_call_date ? `<tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Requested Call</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(requested_call_date)} ${escapeHtml(requested_call_time || '')}</td></tr>` : ''}
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb; vertical-align:top;"><strong>Details</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb; white-space:pre-wrap;">${escapeHtml(project_details || message || '-')}</td></tr>
-                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>SMS consent</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${sms_consent ? 'Yes' : 'No'}</td></tr>
+                  ${rows.map(([label, val]) => `<tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>${escapeHtml(label)}</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${label === 'Email' || label === 'Phone' ? val : escapeHtml(String(val))}</td></tr>`).join('')}
                 </table>
+                ${leadData.message ? `<p style="margin-top:18px;"><strong>Project Details:</strong></p><div style="white-space:pre-wrap; background:#f9fafb; border:1px solid #e5e7eb; padding:12px; border-radius:6px;">${escapeHtml(leadData.message)}</div>` : ''}
                 <p style="margin-top:18px; font-size:12px; color:#6b7280;">Open in Base44 to convert this lead into a deal.</p>
               </div>
             `;
@@ -243,13 +251,10 @@ app.post('/api/leads', async (req, res) => {
                 from: process.env.RESEND_FROM_EMAIL || 'SOCO Production <noreply@socoproduction.com>',
                 to: ['james@socoproduction.com', 'colton@socoproduction.com'],
                 subject,
-                html: htmlBody,
-                reply_to: email,
-            }).then(() => {
-                console.log('Lead notification email sent.');
-            }).catch(e => {
-                console.warn('Lead notification email failed:', e.message);
-            });
+                html,
+                reply_to: leadData.email,
+            }).then(() => console.log('Lead notification email sent.'))
+              .catch(e => console.warn('Lead notification email failed:', e.message));
         }
 
         return res.json({ ok: true, lead });
@@ -261,11 +266,8 @@ app.post('/api/leads', async (req, res) => {
 
 function escapeHtml(s) {
     return String(s == null ? '' : s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 app.use('/webhooks/sms', smsRoutes);
