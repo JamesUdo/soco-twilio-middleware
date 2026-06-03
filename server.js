@@ -12,11 +12,18 @@ const docusignRoutes = require('./routes/docusign');
 
 const app = express();
 
-// Allow browser requests from Base44 frontends
+// CORS: allow Base44 frontends, the SOCO Wix site, and any wixsite.com subdomain.
+// Anonymous Lead/Contact creation is gated by RLS on the Base44 side, so it's
+// safe to open these origins for the /api/leads form-embed endpoint.
 app.use(cors({
     origin: [
         'https://avlproj.base44.app',
         /\.base44\.app$/,
+        'https://socoproduction.com',
+        'https://www.socoproduction.com',
+        /\.wixsite\.com$/,
+        /\.wix\.com$/,
+        /\.editorx\.io$/,
         'http://localhost:3000'
     ],
 }));
@@ -83,9 +90,6 @@ app.post('/api/email/send', async (req, res) => {
 });
 
 // SIMPLE OUTBOUND SMS via Twilio (POST /api/sms/send)
-// Used by the Base44 frontend Communication page. No Base44 lookups —
-// the frontend already knows the contact and is responsible for writing
-// the Message entity. This endpoint only fires the Twilio send.
 const twilioClient = (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
     ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
     : null;
@@ -138,6 +142,131 @@ app.post('/api/sms/send', async (req, res) => {
         });
     }
 });
+
+// PUBLIC LEAD CAPTURE (POST /api/leads)
+// Used by embedded HTML lead forms (Wix, affiliate landing pages, etc).
+// Creates a Lead in Base44 and emails the team. No auth required — Base44
+// RLS already allows anonymous create on the Lead entity.
+app.post('/api/leads', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const {
+            name,
+            email,
+            phone,
+            company,
+            service_type,
+            address,
+            city,
+            state,
+            zip,
+            requested_call_date,
+            requested_call_time,
+            project_details,
+            message,
+            sms_consent,
+            affiliate_slug,
+            affiliate_name,
+            referral_source: rawReferralSource,
+        } = body;
+
+        if (!name || !email || !phone) {
+            return res.status(400).json({ error: 'Missing required fields: name, email, phone.' });
+        }
+
+        // Normalize phone to E.164 (US default)
+        let normalizedPhone = String(phone).trim();
+        if (!normalizedPhone.startsWith('+')) {
+            const digits = normalizedPhone.replace(/\D/g, '');
+            if (digits.length === 10) normalizedPhone = '+1' + digits;
+            else if (digits.length === 11 && digits.startsWith('1')) normalizedPhone = '+' + digits;
+            else if (digits.length) normalizedPhone = '+' + digits;
+        }
+
+        // Affiliate-aware referral source
+        let referral_source = rawReferralSource;
+        if (affiliate_name) referral_source = `Affiliate: ${affiliate_name}`;
+        else if (affiliate_slug) referral_source = `Affiliate: ${affiliate_slug}`;
+
+        const leadData = {
+            name,
+            email,
+            phone: normalizedPhone,
+            company: company || '',
+            service_type: service_type || null,
+            address: address || '',
+            city: city || '',
+            state: state || '',
+            zip: zip || '',
+            requested_call_date: requested_call_date || null,
+            requested_call_time: requested_call_time || null,
+            message: project_details || message || '',
+            sms_consent: !!sms_consent,
+            referral_source: referral_source || null,
+            affiliate_slug: affiliate_slug || null,
+            status: 'New',
+        };
+
+        let lead;
+        try {
+            lead = await base44.createEntity('Lead', leadData);
+        } catch (e) {
+            console.error('Base44 Lead create failed:', e.message);
+            return res.status(502).json({ error: 'Could not save lead. Please try again or call us.', detail: e.message });
+        }
+
+        // Fire team notification email (non-blocking — don't fail the request if email fails)
+        if (resend) {
+            const sourceLabel = referral_source || 'Direct (website)';
+            const subject = affiliate_name
+                ? `New Lead via ${affiliate_name}: ${name}`
+                : `New Lead: ${name}`;
+            const htmlBody = `
+              <div style="font-family: Arial, sans-serif; max-width:600px;">
+                <h2 style="color:#111827; border-bottom:3px solid #F97316; padding-bottom:8px;">New Lead Submitted</h2>
+                <p><strong>Source:</strong> ${sourceLabel}</p>
+                <table style="border-collapse:collapse; width:100%; margin-top:12px;">
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Name</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(name)}</td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Email</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;"><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a></td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Phone</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;"><a href="tel:${escapeHtml(normalizedPhone)}">${escapeHtml(normalizedPhone)}</a></td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Company</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(company || '-')}</td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Service</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(service_type || '-')}</td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Address</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml([address, city, state, zip].filter(Boolean).join(', ') || '-')}</td></tr>
+                  ${requested_call_date ? `<tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>Requested Call</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${escapeHtml(requested_call_date)} ${escapeHtml(requested_call_time || '')}</td></tr>` : ''}
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb; vertical-align:top;"><strong>Details</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb; white-space:pre-wrap;">${escapeHtml(project_details || message || '-')}</td></tr>
+                  <tr><td style="padding:6px 10px; border:1px solid #e5e7eb; background:#f9fafb;"><strong>SMS consent</strong></td><td style="padding:6px 10px; border:1px solid #e5e7eb;">${sms_consent ? 'Yes' : 'No'}</td></tr>
+                </table>
+                <p style="margin-top:18px; font-size:12px; color:#6b7280;">Open in Base44 to convert this lead into a deal.</p>
+              </div>
+            `;
+            resend.emails.send({
+                from: process.env.RESEND_FROM_EMAIL || 'SOCO Production <noreply@socoproduction.com>',
+                to: ['james@socoproduction.com', 'colton@socoproduction.com'],
+                subject,
+                html: htmlBody,
+                reply_to: email,
+            }).then(() => {
+                console.log('Lead notification email sent.');
+            }).catch(e => {
+                console.warn('Lead notification email failed:', e.message);
+            });
+        }
+
+        return res.json({ ok: true, lead });
+    } catch (err) {
+        console.error('lead capture failed:', err);
+        return res.status(500).json({ error: err.message || 'Unknown error' });
+    }
+});
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 
 app.use('/webhooks/sms', smsRoutes);
 app.use('/webhooks/voice', voiceRoutes);
