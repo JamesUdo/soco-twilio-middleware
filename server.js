@@ -12,19 +12,14 @@ const docusignRoutes = require('./routes/docusign');
 
 const app = express();
 
-// CORS: allow Base44 frontends, the SOCO Wix site, and any wixsite.com subdomain.
-app.use(cors({
-    origin: [
-        'https://avlproj.base44.app',
-        /\.base44\.app$/,
-        'https://socoproduction.com',
-        'https://www.socoproduction.com',
-        /\.wixsite\.com$/,
-        /\.wix\.com$/,
-        /\.editorx\.io$/,
-        'http://localhost:3000'
-    ],
-}));
+// CORS: open to any origin. Safe because:
+//   - /api/leads is a public form-submit endpoint (any visitor can submit a lead)
+//   - /api/sms/send and /api/email/send use server-side credentials (Twilio, Resend)
+//     and aren't gated by Origin anyway
+//   - Twilio webhooks (/webhooks/*) come from Twilio servers, not browsers
+// This avoids CORS surprises every time a new Wix preview domain or affiliate
+// site rolls out.
+app.use(cors({ origin: true, credentials: false }));
 
 app.use('/webhooks', express.urlencoded({ extended: false }));
 app.use('/api', express.json({ limit: '25mb' }));
