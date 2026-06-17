@@ -1,31 +1,25 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const twilio = require('twilio');
 const { Resend } = require('resend');
 
 const base44 = require('./lib/base44');
 const quo = require('./lib/quo-client');
-const smsRoutes = require('./routes/sms');
-const voiceRoutes = require('./routes/voice');
-const apiRoutes = require('./routes/api');
 const docusignRoutes = require('./routes/docusign');
 const quoRoutes = require('./routes/quo');
 
 const app = express();
 
-// CORS: open to any origin. Safe because public form endpoints + server-side credential
-// endpoints aren't gated by Origin; webhooks come from providers, not browsers.
+// CORS open to any origin. Safe — public form endpoints + credentialed server-side
+// API endpoints aren't gated by Origin; provider webhooks come from server-to-server.
 app.use(cors({ origin: true, credentials: false }));
 
-// Twilio webhooks use form-encoded; everything else is JSON.
-app.use('/webhooks/sms', express.urlencoded({ extended: false }));
-app.use('/webhooks/voice', express.urlencoded({ extended: false }));
-// Quo sends JSON, but we need the raw body to verify signatures — handled inside routes/quo.js
+// All API endpoints accept JSON. Raw body for Quo webhook signature verification
+// is handled inside routes/quo.js (do NOT add json middleware to /webhooks/quo here).
 app.use('/api', express.json({ limit: '25mb' }));
 
 app.get('/', (req, res) => {
-    res.json({ status: 'ok', service: 'SOCO Middleware (Twilio + Quo + Resend)' });
+    res.json({ status: 'ok', service: 'SOCO Middleware (Quo + Resend)' });
 });
 
 // =====================================================================
@@ -83,14 +77,8 @@ app.post('/api/email/send', async (req, res) => {
 });
 
 // =====================================================================
-// OUTBOUND SMS — uses Quo if QUO_API_KEY is set, otherwise falls back to Twilio.
+// OUTBOUND SMS (Quo)
 // =====================================================================
-const twilioClient = (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN)
-    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-    : null;
-
-const SMS_PROVIDER = process.env.SMS_PROVIDER || (process.env.QUO_API_KEY ? 'quo' : 'twilio');
-
 function normalizeToE164(raw) {
     let n = String(raw || '').trim();
     if (!n) return '';
@@ -103,66 +91,46 @@ function normalizeToE164(raw) {
 }
 
 app.post('/api/sms/send', async (req, res) => {
+    if (!process.env.QUO_API_KEY) {
+        return res.status(500).json({ error: 'QUO_API_KEY is not configured on the server.' });
+    }
     try {
-        const { to, body, from, media_urls } = req.body || {};
+        const { to, body, from } = req.body || {};
         if (!to || !body) {
             return res.status(400).json({ error: 'Missing required fields: to, body.' });
         }
         const toNumber = normalizeToE164(to);
         if (!toNumber) return res.status(400).json({ error: 'Invalid `to` phone number.' });
 
-        // -----------------------------
-        // Provider: Quo (preferred)
-        // -----------------------------
-        if (SMS_PROVIDER === 'quo' && process.env.QUO_API_KEY) {
-            // Resolve sender: either explicit `from` or the rep's TeamPhone Quo number
-            let fromNumber = from;
-            if (!fromNumber && req.body.team_phone_id) {
-                const tp = await base44.getEntity('TeamPhone', req.body.team_phone_id);
-                fromNumber = tp?.twilio_phone_number; // re-using field name; populated with the Quo number after porting/setup
-            }
-            if (!fromNumber) {
-                fromNumber = process.env.QUO_DEFAULT_FROM_NUMBER;
-            }
-            if (!fromNumber) {
-                return res.status(500).json({ error: 'No from-number resolved. Pass `from`, `team_phone_id`, or set QUO_DEFAULT_FROM_NUMBER.' });
-            }
-            try {
-                const msg = await quo.sendSMS({ from: fromNumber, to: toNumber, content: String(body) });
-                console.log(`Quo SMS sent: ${fromNumber} -> ${toNumber} (id=${msg.id})`);
-                return res.json({ ok: true, provider: 'quo', sid: msg.id, status: msg.status, to: toNumber, from: fromNumber });
-            } catch (err) {
-                console.error('Quo SMS send failed:', err.message);
-                return res.status(502).json({ error: err.message, provider: 'quo' });
-            }
+        // Resolve sender — explicit `from`, then TeamPhone lookup, then env fallback
+        let fromNumber = from;
+        if (!fromNumber && req.body.team_phone_id) {
+            const tp = await base44.getEntity('TeamPhone', req.body.team_phone_id);
+            fromNumber = tp?.twilio_phone_number; // field name kept for backwards compat — holds Quo number after migration
+        }
+        if (!fromNumber) {
+            fromNumber = process.env.QUO_DEFAULT_FROM_NUMBER;
+        }
+        if (!fromNumber) {
+            return res.status(500).json({ error: 'No from-number resolved. Pass `from`, `team_phone_id`, or set QUO_DEFAULT_FROM_NUMBER.' });
         }
 
-        // -----------------------------
-        // Provider: Twilio (fallback / legacy)
-        // -----------------------------
-        if (!twilioClient) {
-            return res.status(500).json({ error: 'No SMS provider configured (need QUO_API_KEY or TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN).' });
+        try {
+            const msg = await quo.sendSMS({ from: fromNumber, to: toNumber, content: String(body) });
+            console.log(`Quo SMS sent: ${fromNumber} -> ${toNumber} (id=${msg.id})`);
+            return res.json({ ok: true, provider: 'quo', sid: msg.id, status: msg.status, to: toNumber, from: fromNumber });
+        } catch (err) {
+            console.error('Quo SMS send failed:', err.message);
+            return res.status(502).json({ error: err.message, provider: 'quo' });
         }
-        const params = { to: toNumber, body: String(body) };
-        if (from) params.from = from;
-        else if (process.env.MESSAGING_SERVICE_SID) params.messagingServiceSid = process.env.MESSAGING_SERVICE_SID;
-        else if (process.env.TWILIO_PHONE_NUMBER) params.from = process.env.TWILIO_PHONE_NUMBER;
-        else return res.status(500).json({ error: 'No Twilio from-number / messaging service configured.' });
-
-        if (Array.isArray(media_urls) && media_urls.length) params.mediaUrl = media_urls;
-        if (process.env.BASE_URL) params.statusCallback = `${process.env.BASE_URL}/webhooks/sms/status`;
-
-        const msg = await twilioClient.messages.create(params);
-        console.log(`Twilio SMS sent to ${toNumber} (sid=${msg.sid})`);
-        return res.json({ ok: true, provider: 'twilio', sid: msg.sid, status: msg.status, to: msg.to, from: msg.from });
     } catch (err) {
-        console.error('sms send failed:', err);
-        return res.status(500).json({ error: err.message || 'Unknown error', code: err.code });
+        console.error('sms send handler error:', err);
+        return res.status(500).json({ error: err.message || 'Unknown error' });
     }
 });
 
 // =====================================================================
-// PUBLIC LEAD CAPTURE (unchanged)
+// PUBLIC LEAD CAPTURE
 // =====================================================================
 app.post('/api/leads', async (req, res) => {
     try {
@@ -289,17 +257,12 @@ function escapeHtml(s) {
 // =====================================================================
 // Routes
 // =====================================================================
-app.use('/webhooks/sms', smsRoutes);
-app.use('/webhooks/voice', voiceRoutes);
-app.use('/webhooks/quo', quoRoutes);      // NEW — Quo (OpenPhone) webhooks
-app.use('/api', apiRoutes);
+app.use('/webhooks/quo', quoRoutes);
 app.use('/api/docusign', docusignRoutes);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log('SOCO Middleware running on port ' + PORT);
-    console.log('SMS provider: ' + SMS_PROVIDER);
     console.log('Resend configured: ' + (!!process.env.RESEND_API_KEY));
-    console.log('Twilio configured: ' + (!!twilioClient));
     console.log('Quo configured: ' + (!!process.env.QUO_API_KEY));
 });
