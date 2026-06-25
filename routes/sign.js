@@ -337,14 +337,6 @@ function renderSignPage({ contract, contractHtml, ctx }) {
         </div>
         <div class="contract">${contractHtml}</div>
 
-        <div class="countersig">
-          <p class="countersig-label">SOCO Production countersignature:</p>
-          <img src="${esc(COMPANY.counter_signature_url)}" alt="Colton Henderson signature" />
-          <div class="countersig-line"></div>
-          <p class="countersig-name">${esc(COMPANY.counter_signer_name)}</p>
-          <p class="countersig-meta">${esc(COMPANY.counter_signer_title)} · ${esc(ctx.today)}</p>
-        </div>
-
         <div class="sig-section">
           <h2>Customer Signature</h2>
           <div class="sig-pad-wrap">
