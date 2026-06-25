@@ -267,8 +267,12 @@ function pageShell(bodyHtml, title) {
   .error { color:#991b1b; background:#fee2e2; border:1px solid #fca5a5; padding:10px 14px; border-radius:6px; font-size:14px; margin-top:12px; display:none; }
   .audit-banner { background:#FEF3C7; border-left:4px solid #F59E0B; padding:12px 16px; margin-bottom:24px; font-size:13px; color:#78350F; border-radius:4px; }
   .success-icon { width:64px; height:64px; background:#10B981; border-radius:50%; margin:0 auto 20px; display:flex; align-items:center; justify-content:center; color:white; font-size:36px; line-height:1; }
-  .countersig { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; }
-  .countersig img { height:48px; display:block; margin-bottom:4px; }
+  .countersig { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; text-align:center; }
+  .countersig-label { margin:0 0 4px 0; font-size:13px; color:#6b7280; }
+  .countersig img { height:120px; display:block; margin:0 auto -22px; max-width:80%; object-fit:contain; }
+  .countersig-line { width:80%; max-width:380px; margin:0 auto; border-bottom:1px solid #111827; height:1px; }
+  .countersig-name { margin:8px 0 0 0; font-weight:700; font-size:14px; color:#111827; }
+  .countersig-meta { margin:2px 0 0 0; font-size:12px; color:#6b7280; }
   .footer { text-align:center; padding:18px; color:#6b7280; font-size:12px; }
   @media (max-width: 600px) {
     .card { padding:20px; }
@@ -334,9 +338,11 @@ function renderSignPage({ contract, contractHtml, ctx }) {
         <div class="contract">${contractHtml}</div>
 
         <div class="countersig">
-          <p style="margin:0 0 4px 0; font-size:13px; color:#6b7280;">SOCO Production countersignature:</p>
+          <p class="countersig-label">SOCO Production countersignature:</p>
           <img src="${esc(COMPANY.counter_signature_url)}" alt="Colton Henderson signature" />
-          <p style="margin:0; font-size:12px; color:#6b7280;">${esc(COMPANY.counter_signer_name)} · ${esc(COMPANY.counter_signer_title)} · ${esc(ctx.today)}</p>
+          <div class="countersig-line"></div>
+          <p class="countersig-name">${esc(COMPANY.counter_signer_name)}</p>
+          <p class="countersig-meta">${esc(COMPANY.counter_signer_title)} · ${esc(ctx.today)}</p>
         </div>
 
         <div class="sig-section">
