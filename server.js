@@ -7,6 +7,7 @@ const base44 = require('./lib/base44');
 const quo = require('./lib/quo-client');
 const docusignRoutes = require('./routes/docusign');
 const quoRoutes = require('./routes/quo');
+const signRoutes = require('./routes/sign');
 
 const app = express();
 
@@ -259,6 +260,7 @@ function escapeHtml(s) {
 // =====================================================================
 app.use('/webhooks/quo', quoRoutes);
 app.use('/api/docusign', docusignRoutes);
+app.use('/sign', signRoutes);  // public customer-facing contract signing — no auth
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
