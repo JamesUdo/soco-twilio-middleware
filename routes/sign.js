@@ -39,8 +39,9 @@ function todayIso() { return new Date().toISOString().slice(0, 10); }
 
 async function findContractLogByToken(token) {
     if (!token || typeof token !== 'string') return null;
-    // Use the list endpoint with a filter on signing_token.
-    const list = await base44.queryEntities('ContractLog', { signing_token: token }, 5);
+    // Base44's REST filter syntax doesn't always honor field filters cleanly,
+    // so fetch the full set (capped at 500 to be safe) and match client-side.
+    const list = await base44.queryEntities('ContractLog', {}, 500);
     const arr = Array.isArray(list) ? list : (list.results || list.data || []);
     return arr.find(c => c.signing_token === token) || null;
 }
