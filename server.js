@@ -33,12 +33,17 @@ app.post('/api/email/send', async (req, res) => {
         return res.status(500).json({ error: 'RESEND_API_KEY is not configured on the server.' });
     }
     try {
-        const { to, from, subject, html, text, attachments, reply_to } = req.body || {};
+        const { to, from, cc, bcc, subject, html, text, attachments, reply_to, replyTo } = req.body || {};
         if (!to || !subject || (!html && !text)) {
             return res.status(400).json({ error: 'Missing required fields: to, subject, and html or text.' });
         }
         const fromAddress = from || process.env.RESEND_FROM_EMAIL || 'SOCO Production <noreply@socoproduction.com>';
         const recipients = Array.isArray(to) ? to : [to];
+        // Resend SDK v4 expects camelCase replyTo; snake_case is silently ignored. Accept either. cc/bcc take string or array.
+        const asList = (v) => (v == null || v === '' ? undefined : (Array.isArray(v) ? v : [v]));
+        const ccList = asList(cc);
+        const bccList = asList(bcc);
+        const replyToValue = replyTo || reply_to;
 
         let attachmentObjs = [];
         if (Array.isArray(attachments) && attachments.length > 0) {
@@ -63,7 +68,9 @@ app.post('/api/email/send', async (req, res) => {
             html: html || undefined,
             text: text || undefined,
             attachments: attachmentObjs.length ? attachmentObjs : undefined,
-            reply_to: reply_to || undefined,
+            cc: ccList,
+            bcc: bccList,
+            replyTo: replyToValue || undefined,
         });
 
         if (result.error) {
@@ -237,7 +244,7 @@ app.post('/api/leads', async (req, res) => {
                 to: ['james@socoproduction.com', 'colton@socoproduction.com'],
                 subject,
                 html,
-                reply_to: leadData.email,
+                replyTo: leadData.email,
             }).then(() => console.log('Lead notification email sent.'))
               .catch(e => console.warn('Lead notification email failed:', e.message));
         }
